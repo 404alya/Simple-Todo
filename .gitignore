@@ -1,1 +1,7 @@
-./todos.md
+# Data files
+todos.md
+todos.md.tmp
+
+# Build outputs
+a.out
+*.o

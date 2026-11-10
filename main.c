@@ -5,8 +5,9 @@
 #include <string.h>
 #include <stdlib.h>
 #include <sys/types.h>
+#include <unistd.h>
 
-#define TODO_DEFAULT_DATA_PATH "./todos.md"
+#define TODO_DATA_FILENAME "todos.md"
 #define TODO_ID_MAX_DIGITS 20 /* UINT64_MAX has 20 decimal digits */
 
 #define FNV64_OFFSET_BASIS 14695981039346656037ULL
@@ -21,9 +22,63 @@ static unsigned long long Fnv1a64Update(unsigned long long h, const void *data, 
   return h;
 }
 
-static const char *DataPath(void) {
+/* Absolute path of the running executable, via /proc/self/exe (Linux).
+ * Returns a malloc'd string, or NULL on error (errno set). */
+static char *ExecutablePath(void) {
+  size_t size = 256;
+  for (;;) {
+    char *buf = malloc(size);
+    if (buf == NULL)
+      return NULL;
+    ssize_t len = readlink("/proc/self/exe", buf, size);
+    if (len < 0) {
+      int savedErrno = errno;
+      free(buf);
+      errno = savedErrno;
+      return NULL;
+    }
+    /* readlink doesn't NUL-terminate and silently truncates: if it
+     * filled the buffer, the path may be longer, so grow and retry. */
+    if ((size_t)len < size) {
+      buf[len] = '\0';
+      return buf;
+    }
+    free(buf);
+    size *= 2;
+  }
+}
+
+/* Data file path: $TODO_FILE if set, otherwise todos.md next to the
+ * executable. Returns a malloc'd string, or NULL on error (message printed). */
+static char *DataPath(void) {
   const char *env = getenv("TODO_FILE");
-  return (env != NULL && env[0] != '\0') ? env : TODO_DEFAULT_DATA_PATH;
+  if (env != NULL && env[0] != '\0') {
+    char *copy = malloc(strlen(env) + 1);
+    if (copy == NULL)
+      fprintf(stderr, "Error: out of memory\n");
+    else
+      strcpy(copy, env);
+    return copy;
+  }
+
+  char *exe = ExecutablePath();
+  if (exe == NULL) {
+    perror("Error: could not resolve executable location (/proc/self/exe)");
+    return NULL;
+  }
+
+  /* /proc/self/exe is always absolute, so there's at least one '/'. */
+  char *slash = strrchr(exe, '/');
+  slash[1] = '\0';
+
+  size_t size = strlen(exe) + sizeof TODO_DATA_FILENAME;
+  char *path = malloc(size);
+  if (path == NULL)
+    fprintf(stderr, "Error: out of memory\n");
+  else
+    snprintf(path, size, "%s%s", exe, TODO_DATA_FILENAME);
+  free(exe);
+  return path;
 }
 
 static void PrintUsage(FILE *out) {
@@ -33,8 +88,8 @@ static void PrintUsage(FILE *out) {
     "  add <title> <description>  Add a todo\n"
     "  rm <id> [id...]            Remove todos by id\n"
     "\n"
-    "Data file: $TODO_FILE, or %s if unset\n",
-    TODO_DEFAULT_DATA_PATH);
+    "Data file: $TODO_FILE, or %s next to this executable if unset\n",
+    TODO_DATA_FILENAME);
 }
 
 /* Extracts the id (first space-delimited token) from a line.
@@ -271,37 +326,42 @@ int main(int argc, char *argv[]) {
     return EXIT_FAILURE;
   }
 
-  const char *path = DataPath();
   const char *cmd = argv[1];
-
-  if (strcmp(cmd, "list") == 0) {
-    return CmdList(path);
-  }
-
-  if (strcmp(cmd, "add") == 0) {
-    if (argc != 4) {
-      fprintf(stderr, "add needs exactly a title and a description (quote multi-word values)\n\n");
-      PrintUsage(stderr);
-      return EXIT_FAILURE;
-    }
-    return CmdAdd(path, argv[2], argv[3]);
-  }
-
-  if (strcmp(cmd, "rm") == 0) {
-    if (argc < 3) {
-      fprintf(stderr, "rm needs at least one id\n\n");
-      PrintUsage(stderr);
-      return EXIT_FAILURE;
-    }
-    return CmdRemove(path, argc - 2, argv + 2);
-  }
 
   if (strcmp(cmd, "help") == 0 || strcmp(cmd, "-h") == 0 || strcmp(cmd, "--help") == 0) {
     PrintUsage(stdout);
     return EXIT_SUCCESS;
   }
 
-  fprintf(stderr, "Invalid operation: %s\n\n", cmd);
-  PrintUsage(stderr);
-  return EXIT_FAILURE;
+  /* Validate arguments before touching the filesystem. */
+  if (strcmp(cmd, "add") == 0 && argc != 4) {
+    fprintf(stderr, "add needs exactly a title and a description (quote multi-word values)\n\n");
+    PrintUsage(stderr);
+    return EXIT_FAILURE;
+  }
+  if (strcmp(cmd, "rm") == 0 && argc < 3) {
+    fprintf(stderr, "rm needs at least one id\n\n");
+    PrintUsage(stderr);
+    return EXIT_FAILURE;
+  }
+  if (strcmp(cmd, "list") != 0 && strcmp(cmd, "add") != 0 && strcmp(cmd, "rm") != 0) {
+    fprintf(stderr, "Invalid operation: %s\n\n", cmd);
+    PrintUsage(stderr);
+    return EXIT_FAILURE;
+  }
+
+  char *path = DataPath();
+  if (path == NULL)
+    return EXIT_FAILURE;
+
+  int status;
+  if (strcmp(cmd, "list") == 0)
+    status = CmdList(path);
+  else if (strcmp(cmd, "add") == 0)
+    status = CmdAdd(path, argv[2], argv[3]);
+  else
+    status = CmdRemove(path, argc - 2, argv + 2);
+
+  free(path);
+  return status;
 }
