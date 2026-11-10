@@ -5,3 +5,4 @@ todos.md.tmp
 # Build outputs
 a.out
 *.o
+!todo.o
